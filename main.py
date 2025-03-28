@@ -24,7 +24,7 @@ db = mongo_client.translate
 collection = db.words
 
 
-user_states = {}
+
 
 try:
     mongo_client.admin.command('ping')
@@ -42,8 +42,8 @@ direction_map = {
     "en_ru": {"source": "english", "target": "russian"},
     "ru_ka": {"source": "russian", "target": "georgian"},
     "ka_ru": {"source": "georgian", "target": "russian"},
-    "ru_tr": {"source": "russian", "target": "turkey"},
-    "tr_ru": {"source": "turkey", "target": "russian"}
+    "ru_tr": {"source": "russian", "target": "turkish"},
+    "tr_ru": {"source": "turkish", "target": "russian"}
 }
 
 # Настройка логирования
@@ -122,6 +122,7 @@ def handle_text(message):
         with open(audio_file, 'rb') as audio:
             bot.send_voice(chat_id, audio)
 
+        user_states[chat_id]['audio_path'] = audio_file
         user_states[chat_id]['original_text'] = message.text
         user_states[chat_id]['translated_text'] = translated
         bot.send_message(chat_id, "Хотите добавить полученный результат в базу Монго? Напишите да или нет.")
@@ -161,6 +162,7 @@ def handle_voice(message):
         with open(audio_file, 'rb') as audio:
             bot.send_voice(chat_id, audio)
 
+        user_states[chat_id]['audio_path'] = audio_file
         user_states[chat_id]['original_text'] = text
         user_states[chat_id]['translated_text'] = translated
         bot.send_message(chat_id, "Хотите добавить полученный результат в базу Монго? Напишите да или нет.")
@@ -254,46 +256,46 @@ def handle_save_answer(message):
     user_state = user_states.get(chat_id, {})
 
     if message.text.lower() == 'нет':
-        bot.send_message(chat_id, "Хорошо, перевод не сохранён.")
+        bot.send_message(chat_id, "❌ Перевод не сохранен")
+        user_states[chat_id] = {}  # Полная очистка состояния
         return
 
     try:
-        # Получаем данные из состояния
-        original = user_state.get('original_text')
-        translated = user_state.get('translated_text')
-        direction = user_state.get('direction')
+        # Проверяем наличие всех необходимых данных
+        required_fields = ['original_text', 'translated_text', 'direction', 'audio_path']
+        if not all(field in user_state for field in required_fields):
+            raise ValueError("Недостающие данные для сохранения")
 
-        if not all([original, translated, direction]):
-            raise ValueError("Missing translation data")
-
-        # Создаем документ для базы
+        # Создаем документ
         doc = {
             "russian": "",
             "english": "",
             "georgian": "",
-            "turkey": "",
-            "example": ""
+            "turkish": "",  # Исправлено с turkey на turkish
+            "example": "",
+            "voice": user_state['audio_path']  # Добавлено поле с аудио
         }
 
         # Заполняем соответствующие поля
-        mapping = direction_map.get(direction)
+        mapping = direction_map.get(user_state['direction'])
         if mapping:
-            doc[mapping['source']] = original
-            doc[mapping['target']] = translated
+            doc[mapping['source']] = user_state['original_text']
+            doc[mapping['target']] = user_state['translated_text']
 
         # Сохраняем в MongoDB
-        collection.insert_one(doc)
-        bot.send_message(chat_id, "✅ Перевод успешно сохранен в базе!")
+        result = collection.insert_one(doc)
+        if result.inserted_id:
+            bot.send_message(chat_id, "✅ Перевод успешно сохранен!")
+        else:
+            bot.send_message(chat_id, "❌ Ошибка при сохранении")
 
     except Exception as e:
-        logger.error(f"MongoDB save error: {e}")
-        bot.send_message(chat_id, "❌ Ошибка при сохранении перевода")
+        logger.error(f"MongoDB Error: {str(e)}")
+        bot.send_message(chat_id, "⚠️ Ошибка при сохранении перевода")
     finally:
-        # Очищаем временные данные
-        keys = ['original_text', 'translated_text']
-        for key in keys:
-            if key in user_states[chat_id]:
-                del user_states[chat_id][key]
+        user_states[chat_id] = {}  # Полная очистка состояния
+
+
 
 
 if __name__ == "__main__":
