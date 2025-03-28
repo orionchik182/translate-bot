@@ -6,6 +6,8 @@ import telebot
 from telebot import types
 from gtts import gTTS
 import azure.cognitiveservices.speech as speechsdk
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -13,10 +15,36 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
 AZURE_REGION = os.getenv("AZURE_REGION")
+MONGO_URI = os.getenv("MONGO_URI")
+
+uri = MONGO_URI
+
+mongo_client = MongoClient(uri, server_api=ServerApi('1'))
+db = mongo_client.translate
+collection = db.words
+
+
+user_states = {}
+
+try:
+    mongo_client.admin.command('ping')
+    print("Pinged your deployment. You successfully connected to MongoDB!")
+except Exception as e:
+    print(e)
+
 
 # Инициализация клиентов
 bot = telebot.TeleBot(TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+direction_map = {
+    "ru_en": {"source": "russian", "target": "english"},
+    "en_ru": {"source": "english", "target": "russian"},
+    "ru_ka": {"source": "russian", "target": "georgian"},
+    "ka_ru": {"source": "georgian", "target": "russian"},
+    "ru_tr": {"source": "russian", "target": "turkey"},
+    "tr_ru": {"source": "turkey", "target": "russian"}
+}
 
 # Настройка логирования
 logging.basicConfig(
@@ -94,9 +122,15 @@ def handle_text(message):
         with open(audio_file, 'rb') as audio:
             bot.send_voice(chat_id, audio)
 
+        user_states[chat_id]['original_text'] = message.text
+        user_states[chat_id]['translated_text'] = translated
+        bot.send_message(chat_id, "Хотите добавить полученный результат в базу Монго? Напишите да или нет.")
+
     except Exception as e:
         logger.error(f"Text error: {e}")
         bot.send_message(chat_id, "❌ Ошибка перевода")
+
+
 
 
 # Обработчик голосовых сообщений
@@ -127,9 +161,15 @@ def handle_voice(message):
         with open(audio_file, 'rb') as audio:
             bot.send_voice(chat_id, audio)
 
+        user_states[chat_id]['original_text'] = text
+        user_states[chat_id]['translated_text'] = translated
+        bot.send_message(chat_id, "Хотите добавить полученный результат в базу Монго? Напишите да или нет.")
+
     except Exception as e:
         logger.error(f"Voice error: {e}")
         bot.send_message(chat_id, "❌ Ошибка обработки аудио")
+
+
 
 
 def translate_text(text: str, direction: str) -> str:
@@ -206,6 +246,54 @@ def transcribe_audio(file_path: str) -> str:
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         raise
+
+
+@bot.message_handler(func=lambda message: message.text.lower() in ['да', 'нет'])
+def handle_save_answer(message):
+    chat_id = message.chat.id
+    user_state = user_states.get(chat_id, {})
+
+    if message.text.lower() == 'нет':
+        bot.send_message(chat_id, "Хорошо, перевод не сохранён.")
+        return
+
+    try:
+        # Получаем данные из состояния
+        original = user_state.get('original_text')
+        translated = user_state.get('translated_text')
+        direction = user_state.get('direction')
+
+        if not all([original, translated, direction]):
+            raise ValueError("Missing translation data")
+
+        # Создаем документ для базы
+        doc = {
+            "russian": "",
+            "english": "",
+            "georgian": "",
+            "turkey": "",
+            "example": ""
+        }
+
+        # Заполняем соответствующие поля
+        mapping = direction_map.get(direction)
+        if mapping:
+            doc[mapping['source']] = original
+            doc[mapping['target']] = translated
+
+        # Сохраняем в MongoDB
+        collection.insert_one(doc)
+        bot.send_message(chat_id, "✅ Перевод успешно сохранен в базе!")
+
+    except Exception as e:
+        logger.error(f"MongoDB save error: {e}")
+        bot.send_message(chat_id, "❌ Ошибка при сохранении перевода")
+    finally:
+        # Очищаем временные данные
+        keys = ['original_text', 'translated_text']
+        for key in keys:
+            if key in user_states[chat_id]:
+                del user_states[chat_id][key]
 
 
 if __name__ == "__main__":
